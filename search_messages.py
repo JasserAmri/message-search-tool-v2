@@ -7,8 +7,10 @@ Optimized for large datasets with adaptive chunking and performance monitoring.
 import os
 import sys
 import time
+import random
+import statistics
 from datetime import datetime, timedelta
-from typing import List, Tuple
+from typing import List, Tuple, Dict
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from openpyxl import Workbook
@@ -213,20 +215,23 @@ def export_to_excel(results: List[dict], output_file: str):
     wb.save(output_file)
     log_message(f"   ✅ Excel file saved successfully: {output_file}")
 
-def sample_and_optimize(cursor, keywords: List[str], start_date: datetime, end_date: datetime) -> Tuple[int, int]:
-    """
-    Sample the data to determine optimal chunk size and limit
-    Returns: (optimal_chunk_days, optimal_limit)
-    """
-    log_message("\n🔬 Running intelligent sampling to optimize search parameters...")
+def is_weekend(date: datetime) -> bool:
+    """Check if date falls on weekend (Saturday=5, Sunday=6)"""
+    return date.weekday() >= 5
+
+def calculate_memory_based_limit(estimated_avg_row_size: int = 1200) -> int:
+    """Calculate safe row limit based on memory constraints"""
+    # Conservative: 100MB per chunk
+    available_memory = 100 * 1024 * 1024  # 100MB
+    safe_limit = available_memory // estimated_avg_row_size
     
-    total_days = (end_date - start_date).days
+    # Clamp between 5k and 50k
+    return max(5000, min(50000, safe_limit))
+
+def sample_single_point(cursor, keywords: List[str], sample_date: datetime) -> Tuple[int, float]:
+    """Sample a single day and return (count, query_time)"""
+    sample_end = sample_date + timedelta(days=1)
     
-    # Sample 1 day in the middle of the range
-    sample_start = start_date + timedelta(days=total_days // 2)
-    sample_end = sample_start + timedelta(days=1)
-    
-    # Build sample query
     where_cond, where_params = build_where_condition(keywords)
     sample_query = f"""
         SELECT COUNT(*) as total
@@ -234,60 +239,186 @@ def sample_and_optimize(cursor, keywords: List[str], start_date: datetime, end_d
         WHERE {where_cond}
     """
     
-    params = [sample_start, sample_end] + where_params
+    params = [sample_date, sample_end] + where_params
     
-    try:
-        import time
-        start_time = time.time()
-        cursor.execute(sample_query, params)
-        result = cursor.fetchone()
-        sample_time = time.time() - start_time
-        sample_count = result['total']
-        
-        log_message(f"   📊 Sample results (1 day in middle of range):")
-        log_message(f"      Date: {sample_start.strftime('%Y-%m-%d')}")
-        log_message(f"      Messages found: {sample_count:,}")
-        log_message(f"      Query time: {sample_time:.2f}s")
-        
-        # Determine optimal chunk size based on density
-        if sample_count == 0:
-            optimal_chunk = 7  # No results, use larger chunks
-            optimal_limit = 20000
-            log_message(f"   💡 No results in sample - using larger chunks (7 days)")
-        elif sample_count < 100:
-            optimal_chunk = 7  # Low density, use larger chunks
-            optimal_limit = 20000
-            log_message(f"   💡 Low density detected - using larger chunks (7 days)")
-        elif sample_count < 1000:
-            optimal_chunk = 5  # Medium density
-            optimal_limit = 20000
-            log_message(f"   💡 Medium density detected - using 5-day chunks")
-        elif sample_count < 5000:
-            optimal_chunk = 3  # High density
-            optimal_limit = 20000
-            log_message(f"   💡 High density detected - using 3-day chunks")
+    start_time = time.time()
+    cursor.execute(sample_query, params)
+    result = cursor.fetchone()
+    query_time = time.time() - start_time
+    
+    return result['total'], query_time
+
+def build_adaptive_density_map(samples: List[Dict], start_date: datetime, end_date: datetime, 
+                               mean_density: float, limit_per_chunk: int) -> List[Dict]:
+    """Build adaptive chunk plan based on sampling results"""
+    density_map = []
+    current_date = start_date
+    
+    # Calculate optimal chunk size based on density
+    def get_chunk_days(estimated_daily_count: float, is_weekend: bool) -> int:
+        if is_weekend:
+            # Weekends typically have less traffic - use larger chunks
+            base_multiplier = 2.0
         else:
-            optimal_chunk = 1  # Very high density
-            optimal_limit = min(sample_count * 2, 30000)  # Adjust limit based on density
-            log_message(f"   💡 Very high density detected - using 1-day chunks")
-            log_message(f"   💡 Adjusted limit to {optimal_limit:,} per chunk")
+            base_multiplier = 1.0
+            
+        if estimated_daily_count < 100:
+            return int(7 * base_multiplier)  # Very sparse - large chunks
+        elif estimated_daily_count < 1000:
+            return int(5 * base_multiplier)  # Low density
+        elif estimated_daily_count < 5000:
+            return int(3 * base_multiplier)  # Medium density
+        elif estimated_daily_count < 10000:
+            return int(2 * base_multiplier)  # High density
+        else:
+            return 1  # Very high density - single days
+    
+    while current_date < end_date:
+        # Use mean density as estimate (in real implementation, interpolate from samples)
+        estimated_count = mean_density
+        weekend = is_weekend(current_date)
+        chunk_days = get_chunk_days(estimated_count, weekend)
         
-        # Estimate total results and time
-        estimated_total = sample_count * total_days
-        estimated_chunks = (total_days + optimal_chunk - 1) // optimal_chunk
-        estimated_time = sample_time * estimated_chunks
+        chunk_end = min(current_date + timedelta(days=chunk_days), end_date)
+        estimated_chunk_total = estimated_count * (chunk_end - current_date).days
         
-        log_message(f"   📈 Estimates:")
-        log_message(f"      Total results: ~{estimated_total:,}")
-        log_message(f"      Chunks needed: ~{estimated_chunks}")
-        log_message(f"      Estimated time: ~{estimated_time:.0f}s ({estimated_time/60:.1f} min)")
+        density_map.append({
+            'start': current_date,
+            'end': chunk_end,
+            'days': (chunk_end - current_date).days,
+            'estimated_rows': int(estimated_chunk_total),
+            'is_weekend': weekend
+        })
         
-        return optimal_chunk, optimal_limit
+        current_date = chunk_end
+    
+    return density_map
+
+def sample_and_optimize(cursor, keywords: List[str], start_date: datetime, end_date: datetime) -> Tuple[int, int, List[Dict]]:
+    """
+    Enhanced multi-point sampling with statistical analysis
+    Returns: (optimal_chunk_days, optimal_limit, density_map)
+    """
+    log_message("\n🔬 Running enhanced multi-point statistical sampling...")
+    
+    total_days = (end_date - start_date).days
+    
+    # Generate 5-7 sample points
+    sample_points = []
+    if total_days >= 7:
+        # Multiple sample points for statistical significance
+        sample_points = [
+            start_date + timedelta(days=2),                    # Early
+            start_date + timedelta(days=total_days // 4),      # 25%
+            start_date + timedelta(days=total_days // 2),      # 50% (middle)
+            start_date + timedelta(days=3 * total_days // 4),  # 75%
+            end_date - timedelta(days=2),                      # Late
+        ]
         
-    except Exception as e:
-        log_message(f"   ⚠️  Sampling failed: {e}")
-        log_message(f"   Using default parameters")
-        return 3, 20000
+        # Add 1-2 random points for anomaly detection
+        if total_days > 14:
+            random_days = random.sample(range(3, total_days - 3), min(2, total_days - 6))
+            sample_points.extend([start_date + timedelta(days=d) for d in random_days])
+    else:
+        # For short ranges, sample what we can
+        sample_points = [start_date + timedelta(days=i) for i in range(0, total_days, max(1, total_days // 3))]
+    
+    # Sample each point
+    samples = []
+    log_message(f"   Sampling {len(sample_points)} strategic points across date range...")
+    
+    for i, sample_date in enumerate(sample_points, 1):
+        try:
+            count, query_time = sample_single_point(cursor, keywords, sample_date)
+            weekend = is_weekend(sample_date)
+            
+            samples.append({
+                'date': sample_date,
+                'count': count,
+                'query_time': query_time,
+                'is_weekend': weekend
+            })
+            
+            weekend_label = " (weekend)" if weekend else ""
+            log_message(f"   📊 Sample {i}/{len(sample_points)}: {sample_date.strftime('%Y-%m-%d')}{weekend_label} = {count:,} messages ({query_time:.2f}s)")
+            
+        except Exception as e:
+            log_message(f"   ⚠️  Sample {i} failed: {e}")
+            continue
+    
+    if not samples:
+        log_message(f"   ⚠️  All sampling failed, using defaults")
+        return 3, 20000, []
+    
+    # Statistical analysis
+    counts = [s['count'] for s in samples]
+    mean_density = statistics.mean(counts)
+    
+    if len(counts) > 1:
+        std_dev = statistics.stdev(counts)
+        variance = std_dev / mean_density if mean_density > 0 else 0
+    else:
+        std_dev = 0
+        variance = 0
+    
+    # Weekday vs weekend analysis
+    weekday_samples = [s['count'] for s in samples if not s['is_weekend']]
+    weekend_samples = [s['count'] for s in samples if s['is_weekend']]
+    
+    weekday_avg = statistics.mean(weekday_samples) if weekday_samples else mean_density
+    weekend_avg = statistics.mean(weekend_samples) if weekend_samples else mean_density
+    weekend_penalty = ((weekday_avg - weekend_avg) / weekday_avg * 100) if weekday_avg > 0 else 0
+    
+    log_message(f"\n   📈 Statistical Analysis:")
+    log_message(f"      Mean density: {mean_density:,.1f} messages/day")
+    log_message(f"      Std deviation: {std_dev:,.1f}")
+    log_message(f"      Variance coefficient: {variance:.2f}")
+    
+    if weekday_samples and weekend_samples:
+        log_message(f"      Weekday average: {weekday_avg:,.0f} messages/day")
+        log_message(f"      Weekend average: {weekend_avg:,.0f} messages/day")
+        log_message(f"      Weekend penalty: {weekend_penalty:.0f}% fewer messages")
+    
+    # Calculate memory-based limit
+    optimal_limit = calculate_memory_based_limit()
+    log_message(f"\n   💾 Memory-based limit: {optimal_limit:,} rows per chunk")
+    
+    # Build adaptive density map
+    log_message(f"\n   🗺️  Building adaptive density map...")
+    density_map = build_adaptive_density_map(samples, start_date, end_date, mean_density, optimal_limit)
+    
+    # Log density map summary
+    total_chunks = len(density_map)
+    avg_chunk_days = statistics.mean([c['days'] for c in density_map])
+    
+    log_message(f"      Total chunks planned: {total_chunks}")
+    log_message(f"      Average chunk size: {avg_chunk_days:.1f} days")
+    log_message(f"      Chunk size range: {min(c['days'] for c in density_map)}-{max(c['days'] for c in density_map)} days")
+    
+    # Show first few chunks as preview
+    log_message(f"\n   📋 Chunk Plan Preview (first 5):")
+    for i, chunk in enumerate(density_map[:5], 1):
+        weekend_label = " 🏖️" if chunk['is_weekend'] else ""
+        log_message(f"      Chunk {i}: {chunk['start'].strftime('%Y-%m-%d')} to {chunk['end'].strftime('%Y-%m-%d')} "
+                   f"({chunk['days']}d{weekend_label}) ~ {chunk['estimated_rows']:,} rows")
+    
+    if total_chunks > 5:
+        log_message(f"      ... and {total_chunks - 5} more chunks")
+    
+    # Estimate total time
+    avg_query_time = statistics.mean([s['query_time'] for s in samples])
+    estimated_time = avg_query_time * total_chunks
+    estimated_total = sum(c['estimated_rows'] for c in density_map)
+    
+    log_message(f"\n   ⏱️  Performance Estimates:")
+    log_message(f"      Estimated total results: ~{estimated_total:,}")
+    log_message(f"      Estimated total time: ~{estimated_time:.0f}s ({estimated_time/60:.1f} min)")
+    log_message(f"      Average query time: {avg_query_time:.2f}s")
+    
+    # Return a default chunk size for legacy compatibility (will use density_map instead)
+    optimal_chunk = int(avg_chunk_days)
+    
+    return optimal_chunk, optimal_limit, density_map
 
 def main():
     """Main execution with adaptive chunking"""
@@ -388,10 +519,11 @@ def main():
         return
     
     # Run intelligent sampling if auto-optimize is enabled
+    density_map = []
     if auto_optimize:
         with conn.cursor() as cursor:
-            chunk_days_start, limit_per_chunk = sample_and_optimize(cursor, keywords, start_date, end_date)
-            log_message(f"\n✅ Optimization complete - using {chunk_days_start}-day chunks with {limit_per_chunk:,} limit")
+            chunk_days_start, limit_per_chunk, density_map = sample_and_optimize(cursor, keywords, start_date, end_date)
+            log_message(f"\n✅ Optimization complete - using adaptive chunking with {limit_per_chunk:,} limit per chunk")
     
     # Initialize variables for adaptive chunking
     current_date = start_date
@@ -403,90 +535,158 @@ def main():
     try:
         # Process in chunks
         total_days = (end_date - start_date).days
-        log_message(f"Processing {total_days} days in chunks of {chunk_days} days...")
+        
+        # Use density map if available, otherwise use traditional chunking
+        if density_map:
+            log_message(f"\n🗺️  Using adaptive density map with {len(density_map)} pre-planned chunks")
+            estimated_chunks = len(density_map)
+            chunk_plan = density_map
+        else:
+            log_message(f"Processing {total_days} days in chunks of {chunk_days} days...")
+            estimated_chunks = (total_days + chunk_days - 1) // chunk_days
+            chunk_plan = None
         
         # Disable tqdm when running in web mode to avoid progress bar artifacts in logs
         use_tqdm = sys.stdout.isatty()
         
         pbar = tqdm(total=total_days, desc="Progress", disable=not use_tqdm)
         
-        # Calculate estimated chunks
-        estimated_chunks = (total_days + chunk_days - 1) // chunk_days
-        
         try:
-            while current_date < end_date:
-                # Check for cancellation
-                if is_cancelled():
-                    log_message("\n⚠️  Search cancelled by user")
-                    break
-                
-                total_chunks += 1
-                chunk_end = min(current_date + timedelta(days=chunk_days), end_date)
-                
-                # Calculate progress
-                days_processed = (current_date - start_date).days
-                progress_percent = int((days_processed / total_days) * 100) if total_days > 0 else 0
-                
-                # Estimate time remaining
-                if total_time > 0 and days_processed > 0:
-                    avg_time_per_day = total_time / days_processed
-                    days_remaining = total_days - days_processed
-                    eta_seconds = int(avg_time_per_day * days_remaining)
-                    eta_minutes = eta_seconds // 60
-                    eta_display = f"{eta_minutes}m {eta_seconds % 60}s" if eta_minutes > 0 else f"{eta_seconds}s"
-                else:
-                    eta_display = "calculating..."
-                
-                # Log chunk info with progress
-                chunk_days_actual = (chunk_end - current_date).days
-                progress_data = {
-                    'progress': progress_percent,
-                    'current_chunk': total_chunks,
-                    'estimated_chunks': estimated_chunks,
-                    'eta': eta_display,
-                    'results_so_far': len(all_results)
-                }
-                log_message(
-                    f"\n📅 Chunk {total_chunks}/{estimated_chunks} ({progress_percent}%) - ETA: {eta_display}\n"
-                    f"   Date range: {current_date.strftime('%Y-%m-%d')} to {chunk_end.strftime('%Y-%m-%d')} ({chunk_days_actual} days)\n"
-                    f"   Results so far: {len(all_results):,}",
-                    progress_data=progress_data
-                )
-                
-                # Skip chunks that are completely before start_date (shouldn't happen but just in case)
-                if chunk_end <= start_date:
-                    log_message(f"Skipping chunk (before start date)")
-                    current_date = chunk_end
-                    pbar.update(chunk_days_actual)
-                    continue
-                
-                # Execute search with a new cursor for each chunk
-                with conn.cursor() as cursor:
-                    chunk_results, duration = search_chunk(
-                        cursor, keywords, current_date, chunk_end, limit_per_chunk
+            # Iterate through planned chunks or traditional chunks
+            if chunk_plan:
+                # Use adaptive density map
+                for chunk_info in chunk_plan:
+                    # Check for cancellation
+                    if is_cancelled():
+                        log_message("\n⚠️  Search cancelled by user")
+                        break
+                    
+                    total_chunks += 1
+                    current_date = chunk_info['start']
+                    chunk_end = chunk_info['end']
+                    chunk_days_actual = chunk_info['days']
+                    
+                    # Calculate progress
+                    days_processed = (current_date - start_date).days
+                    progress_percent = int((total_chunks / estimated_chunks) * 100)
+                    
+                    # Estimate time remaining
+                    if total_time > 0 and total_chunks > 1:
+                        avg_time_per_chunk = total_time / (total_chunks - 1)
+                        chunks_remaining = estimated_chunks - total_chunks
+                        eta_seconds = int(avg_time_per_chunk * chunks_remaining)
+                        eta_minutes = eta_seconds // 60
+                        eta_display = f"{eta_minutes}m {eta_seconds % 60}s" if eta_minutes > 0 else f"{eta_seconds}s"
+                    else:
+                        eta_display = "calculating..."
+                    
+                    # Log chunk info with progress
+                    weekend_label = " 🏖️" if chunk_info['is_weekend'] else ""
+                    progress_data = {
+                        'progress': progress_percent,
+                        'current_chunk': total_chunks,
+                        'estimated_chunks': estimated_chunks,
+                        'eta': eta_display,
+                        'results_so_far': len(all_results)
+                    }
+                    log_message(
+                        f"\n📅 Chunk {total_chunks}/{estimated_chunks} ({progress_percent}%) - ETA: {eta_display}\n"
+                        f"   Date range: {current_date.strftime('%Y-%m-%d')} to {chunk_end.strftime('%Y-%m-%d')} ({chunk_days_actual} days{weekend_label})\n"
+                        f"   Results so far: {len(all_results):,}",
+                        progress_data=progress_data
                     )
-                    total_time += duration if duration > 0 else 0
                     
-                    # Process results
-                    all_results.extend(chunk_results)
-                    pbar.update((chunk_end - current_date).days)
+                    # Execute search with a new cursor for each chunk
+                    with conn.cursor() as cursor:
+                        chunk_results, duration = search_chunk(
+                            cursor, keywords, current_date, chunk_end, limit_per_chunk
+                        )
+                        total_time += duration if duration > 0 else 0
+                        
+                        # Process results
+                        all_results.extend(chunk_results)
+                        pbar.update(chunk_days_actual)
+                        
+                        # Check if hit limit
+                        if len(chunk_results) >= limit_per_chunk:
+                            log_message(f"\n⚠️  Hit limit of {limit_per_chunk} results in one chunk")
+                            log_message(f"   → Some results may be missing from {current_date.date()}")
+            else:
+                # Traditional chunking (legacy)
+                while current_date < end_date:
+                    # Check for cancellation
+                    if is_cancelled():
+                        log_message("\n⚠️  Search cancelled by user")
+                        break
                     
-                    # Performance feedback
-                    if duration > TIMEOUT_WARNING:
-                        log_message(f"\n⚠️  Slow query: {duration:.1f}s (chunk {chunk_days}d)")
-                        chunk_days = max(CHUNK_DAYS_MIN, chunk_days - 1)
-                        log_message(f"   → Reducing chunk size to {chunk_days} days")
-                    elif duration > 0 and duration < 30 and chunk_days < CHUNK_DAYS_MAX:
-                        chunk_days = min(CHUNK_DAYS_MAX, chunk_days + 1)
-                        log_message(f"\n✓ Fast query: {duration:.1f}s")
-                        log_message(f"   → Increasing chunk size to {chunk_days} days")
+                    total_chunks += 1
+                    chunk_end = min(current_date + timedelta(days=chunk_days), end_date)
                     
-                    # Check if hit limit
-                    if len(chunk_results) >= limit_per_chunk:
-                        log_message(f"\n⚠️  Hit limit of {limit_per_chunk} results in one chunk")
-                        log_message(f"   → Some results may be missing from {current_date.date()}")
+                    # Calculate progress
+                    # Calculate progress
+                    days_processed = (current_date - start_date).days
+                    progress_percent = int((days_processed / total_days) * 100) if total_days > 0 else 0
                     
-                    current_date = chunk_end
+                    # Estimate time remaining
+                    if total_time > 0 and days_processed > 0:
+                        avg_time_per_day = total_time / days_processed
+                        days_remaining = total_days - days_processed
+                        eta_seconds = int(avg_time_per_day * days_remaining)
+                        eta_minutes = eta_seconds // 60
+                        eta_display = f"{eta_minutes}m {eta_seconds % 60}s" if eta_minutes > 0 else f"{eta_seconds}s"
+                    else:
+                        eta_display = "calculating..."
+                    
+                    # Log chunk info with progress
+                    chunk_days_actual = (chunk_end - current_date).days
+                    progress_data = {
+                        'progress': progress_percent,
+                        'current_chunk': total_chunks,
+                        'estimated_chunks': estimated_chunks,
+                        'eta': eta_display,
+                        'results_so_far': len(all_results)
+                    }
+                    log_message(
+                        f"\n📅 Chunk {total_chunks}/{estimated_chunks} ({progress_percent}%) - ETA: {eta_display}\n"
+                        f"   Date range: {current_date.strftime('%Y-%m-%d')} to {chunk_end.strftime('%Y-%m-%d')} ({chunk_days_actual} days)\n"
+                        f"   Results so far: {len(all_results):,}",
+                        progress_data=progress_data
+                    )
+                    
+                    # Skip chunks that are completely before start_date (shouldn't happen but just in case)
+                    if chunk_end <= start_date:
+                        log_message(f"Skipping chunk (before start date)")
+                        current_date = chunk_end
+                        pbar.update(chunk_days_actual)
+                        continue
+                    
+                    # Execute search with a new cursor for each chunk
+                    with conn.cursor() as cursor:
+                        chunk_results, duration = search_chunk(
+                            cursor, keywords, current_date, chunk_end, limit_per_chunk
+                        )
+                        total_time += duration if duration > 0 else 0
+                        
+                        # Process results
+                        all_results.extend(chunk_results)
+                        pbar.update((chunk_end - current_date).days)
+                        
+                        # Performance feedback
+                        if duration > TIMEOUT_WARNING:
+                            log_message(f"\n⚠️  Slow query: {duration:.1f}s (chunk {chunk_days}d)")
+                            chunk_days = max(CHUNK_DAYS_MIN, chunk_days - 1)
+                            log_message(f"   → Reducing chunk size to {chunk_days} days")
+                        elif duration > 0 and duration < 30 and chunk_days < CHUNK_DAYS_MAX:
+                            chunk_days = min(CHUNK_DAYS_MAX, chunk_days + 1)
+                            log_message(f"\n✓ Fast query: {duration:.1f}s")
+                            log_message(f"   → Increasing chunk size to {chunk_days} days")
+                        
+                        # Check if hit limit
+                        if len(chunk_results) >= limit_per_chunk:
+                            log_message(f"\n⚠️  Hit limit of {limit_per_chunk} results in one chunk")
+                            log_message(f"   → Some results may be missing from {current_date.date()}")
+                        
+                        current_date = chunk_end
             
             # Process results if we have any
             if all_results:
