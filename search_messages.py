@@ -409,89 +409,74 @@ def main():
                     current_date = chunk_end
         finally:
             pbar.close()
-            
-            # Save results to Excel if we have any
-            if all_results:
-                # Generate filename
-                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                if custom_filename:
-                    # Use custom filename, sanitize it
-                    safe_filename = "".join(c for c in custom_filename if c.isalnum() or c in (' ', '-', '_')).strip()
-                    filename = f'{safe_filename}_{timestamp}.xlsx'
-                else:
-                    filename = f'keyword_results_{timestamp}.xlsx'
-                
-                # Determine save location - try Downloads folder first
-                try:
-                    import pathlib
-                    downloads_path = pathlib.Path.home() / "Downloads"
-                    if downloads_path.exists():
-                        full_path = downloads_path / filename
-                    else:
-                        full_path = pathlib.Path(filename)
-                except:
-                    full_path = pathlib.Path(filename)
-                
-                # Create workbook and worksheet with UTF-8 encoding
-                wb = Workbook()
-                ws = wb.active
-                ws.title = "Search Results"
-                
-                # Set encoding options for proper UTF-8 support
-                wb.encoding = 'utf-8'
-                
-                # Write headers with bold formatting
-                from openpyxl.styles import Font, Alignment
-                header_font = Font(bold=True)
-                for col_idx, header in enumerate(COLUMNS, 1):
-                    cell = ws.cell(row=1, column=col_idx, value=header)
-                    cell.font = header_font
-                    cell.alignment = Alignment(horizontal='left', vertical='top')
-                
-                # Write data - ensure all text is properly encoded
-                for row_idx, row in enumerate(all_results, 2):
-                    for col_idx, col_name in enumerate(COLUMNS, 1):
-                        value = row[col_name]
-                        # Ensure proper string encoding for text fields
-                        if isinstance(value, str):
-                            value = value.encode('utf-8', errors='ignore').decode('utf-8')
-                        cell = ws.cell(row=row_idx, column=col_idx, value=value)
-                        # Wrap text for content column
-                        if col_name == 'content':
-                            cell.alignment = Alignment(wrap_text=True, vertical='top')
-                
-                # Auto-adjust column widths
-                for column in ws.columns:
-                    max_length = 0
-                    column_letter = column[0].column_letter
-                    for cell in column:
-                        try:
-                            if cell.value and len(str(cell.value)) > max_length:
-                                max_length = len(str(cell.value))
-                        except:
-                            pass
-                    adjusted_width = min(max_length + 2, 100)  # Max width 100
-                    ws.column_dimensions[column_letter].width = adjusted_width
-                
-                # Save the file with UTF-8 BOM for Excel compatibility
-                wb.save(str(full_path))
-                
-                log_message(f"\n✅ Search completed in {total_time:.1f} seconds")
-                log_message(f"   Found {len(all_results):,} results in {total_chunks} chunks")
-                log_message(f"   Results saved to: {full_path}")
-                log_message(f"   File encoding: UTF-8 (supports all languages)")
-            else:
-                log_message("\n🔍 No results found for the given criteria.")
-                
-    except Exception as e:
-        log_message(f"\n❌ An error occurred during search: {e}")
-        if 'conn' in locals() and conn is not None:
-            conn.rollback()
-    finally:
-        # Close database connection
-        if 'conn' in locals() and conn is not None:
-            conn.close()
-            log_message("✅ Database connection closed")
+    
+    # Process results if we have any
+    if all_results:
+        # Generate a filename for reference
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        if custom_filename:
+            safe_filename = "".join(c for c in custom_filename if c.isalnum() or c in (' ', '-', '_')).strip()
+            filename = f'{safe_filename}_{timestamp}.xlsx'
+        else:
+            filename = f'keyword_results_{timestamp}.xlsx'
+        
+        # Export to Excel and get the temp file path
+        excel_path = export_to_excel(all_results)
+        
+        # Print summary
+        log_message("\n" + "=" * 60)
+        log_message(f"✅ Search completed successfully!")
+        log_message(f"   Total results: {len(all_results):,}")
+        log_message(f"   Total chunks: {total_chunks}")
+        log_message(f"   Total time: {total_time:.1f} seconds")
+        log_message(f"   Results prepared in: {excel_path}")
+        log_message("=" * 60)
+        
+        # Return the results and file path for the web app to handle
+        return {
+            'success': True,
+            'result_count': len(all_results),
+            'excel_path': excel_path,
+            'filename': filename,
+            'logs': get_logs()  # Get all logs so far
+        }
+    else:
+        log_message("\nNo results found for the given criteria.")
+        return {
+            'success': True,
+            'result_count': 0,
+            'message': 'No results found',
+            'logs': get_logs()
+        }
+        
+except Exception as e:
+    log_message(f"\n❌ An error occurred during search: {e}")
+    if 'conn' in locals() and conn is not None:
+        conn.rollback()
+    return {
+        'success': False,
+        'error': str(e),
+        'logs': get_logs()
+    }
+finally:
+    # Close database connection
+    if 'conn' in locals() and conn is not None:
+        conn.close()
+        log_message("✅ Database connection closed")
+
+# Global variable to store logs
+_logs = []
+
+def get_logs():
+    """Get all logs captured so far"""
+    return "\n".join(_logs)
+
+def log_message(message):
+    """Print a message with timestamp and store it in logs"""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    log_entry = f"{timestamp} - {message}"
+    print(log_entry, flush=True)
+    _logs.append(log_entry)
 
 if __name__ == "__main__":
     main()

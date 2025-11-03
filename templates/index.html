@@ -376,17 +376,35 @@
         // Start log updates
         function startLogUpdates() {
             // Clear any existing interval
-            if (logInterval) clearInterval(logInterval);
+            stopLogUpdates();
+            
+            // Reset counters
+            lastLogCount = 0;
+            errorCount = 0;
             
             // Initial fetch
-            fetchLogs();
+            fetchLogs().catch(console.error);
             
             // Set up polling
-            logInterval = setInterval(fetchLogs, 2000);
+            logInterval = setInterval(() => {
+                fetchLogs().catch(console.error);
+            }, 2000);
+        }
+        
+        // Stop log updates
+        function stopLogUpdates() {
+            if (logInterval) {
+                clearInterval(logInterval);
+                logInterval = null;
+            }
         }
         
         // Track last log count to avoid duplicates
         let lastLogCount = 0;
+        
+        // Keep track of error count to prevent infinite loops
+        let errorCount = 0;
+        const MAX_ERRORS = 3;
         
         // Fetch logs from server
         async function fetchLogs() {
@@ -395,23 +413,37 @@
             try {
                 const response = await axios.get(`/api/logs/${currentSearchId}`);
                 
+                // Reset error count on successful response
+                errorCount = 0;
+                
                 // Handle 202 (Accepted) - search is still running but no logs yet
                 if (response.status === 202) {
-                    if (logContainer.textContent.includes('No logs found for this search yet')) {
+                    if (logContainer.textContent.includes('Search is starting')) {
                         return; // Don't keep adding the same message
                     }
-                    if (!logContainer.textContent.includes('Search is starting')) {
-                        logContainer.innerHTML = '';
-                        addLogEntry('Search is starting. This may take a moment...', 'info');
+                    logContainer.innerHTML = '';
+                    addLogEntry('Search is starting. This may take a moment...', 'info');
+                    return;
+                }
+                
+                // Handle 404 - Logs not found
+                if (response.status === 404) {
+                    if (logContainer.textContent.includes('Logs not found')) {
+                        return; // Don't keep adding the same message
                     }
+                    logContainer.innerHTML = '';
+                    addLogEntry('Logs not found. The search may have completed or the logs have been cleared.', 'warning');
+                    stopLogUpdates();
                     return;
                 }
                 
                 // Handle successful response with logs
                 if (response.data) {
-                    const logs = response.data.split('\n').filter(line => line.trim() !== '');
+                    const logs = typeof response.data === 'string' ? 
+                        response.data.split('\n').filter(line => line.trim() !== '') : 
+                        [response.data];
                     
-                    if (logs.length === 0) {
+                    if (logs.length === 0 || (logs.length === 1 && logs[0] === '')) {
                         if (!logContainer.textContent.includes('No logs available')) {
                             logContainer.innerHTML = '';
                             addLogEntry('No logs available yet. The search is starting...', 'info');
@@ -429,7 +461,7 @@
                         // Add only new logs
                         for (let i = lastLogCount; i < logs.length; i++) {
                             const log = logs[i];
-                            if (!log.trim()) continue;
+                            if (!log || !log.trim()) continue;
                             
                             // Simple log type detection
                             let type = 'info';
@@ -496,6 +528,25 @@
                 }
             } catch (error) {
                 console.error('Error fetching logs:', error);
+                
+                // Increment error count
+                errorCount++;
+                
+                // If we've had too many errors, stop polling
+                if (errorCount >= MAX_ERRORS) {
+                    addLogEntry('Stopped checking for updates due to repeated errors.', 'error');
+                    stopLogUpdates();
+                    return;
+                }
+                
+                // Show error to user (but only once)
+                if (errorCount === 1) {
+                    const errorMsg = error.response?.status === 404 ? 
+                        'Logs not found. The search may have completed or been cleared.' :
+                        `Error loading logs: ${error.message}`;
+                    
+                    addLogEntry(errorMsg, 'error');
+                }
             }
         }
         
