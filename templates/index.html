@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Message Search Tool</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="min-h-screen">
+        <!-- Header -->
+        <header class="header text-white p-4">
+            <div class="container mx-auto flex justify-between items-center">
+                <div class="flex items-center space-x-3">
+                    <i class="fas fa-search text-2xl"></i>
+                    <h1 class="text-2xl font-bold">Message Search Tool</h1>
+                </div>
+                <div class="flex items-center space-x-4">
+                    <div id="connection-status" class="flex items-center text-sm">
+                        <span class="connection-indicator disconnected"></span>
+                        <span id="connection-text">Disconnected</span>
+                    </div>
+                    <div class="theme-toggle" id="themeToggle" title="Toggle theme">
+                        <div class="theme-toggle-slider">
+                            <i class="fas fa-sun" id="themeIcon"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </header>
+
+        <div class="container mx-auto p-4 grid grid-cols-1 lg:grid-cols-4 gap-6">
+            <!-- Search Form -->
+            <div class="lg:col-span-1 card p-6 fade-in">
+                <h2 class="text-xl font-semibold mb-4">Search Parameters</h2>
+                
+                <form id="searchForm" class="space-y-4">
+                    <div>
+                        <label for="keywords" class="block text-sm font-medium mb-2">
+                            <i class="fas fa-tags mr-1"></i> Keywords (comma-separated)
+                        </label>
+                        <input type="text" id="keywords" name="keywords" value="smoke, smoking" 
+                               placeholder="Enter keywords separated by commas"
+                               aria-label="Search keywords"
+                               class="w-full">
+                    </div>
+                    
+                    <!-- Date Range Picker -->
+                    <div class="mb-4">
+                        <label class="block text-sm font-medium mb-2">
+                            <i class="fas fa-calendar-alt mr-1"></i> Date Range
+                        </label>
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label for="start_date" class="block text-xs mb-1 label-secondary">Start Date</label>
+                                <input type="date" name="start_date" id="start_date" 
+                                       aria-label="Start date for search"
+                                       class="w-full">
+                            </div>
+                            <div>
+                                <label for="end_date" class="block text-xs mb-1 label-secondary">End Date</label>
+                                <input type="date" name="end_date" id="end_date" 
+                                       aria-label="End date for search"
+                                       class="w-full">
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div>
+                        <label class="block text-sm font-medium mb-2">
+                            <i class="fas fa-layer-group mr-1"></i> Initial Chunk Size (days)
+                        </label>
+                        <input type="number" id="chunkDays" name="chunkDays" value="3" min="1" max="30"
+                               placeholder="Enter chunk size in days"
+                               aria-label="Chunk size in days"
+                               class="w-full">
+                    </div>
+                    
+                    <div>
+                        <label class="block text-sm font-medium mb-2">
+                            <i class="fas fa-database mr-1"></i> Max Results per Chunk
+                        </label>
+                        <input type="number" id="limitPerChunk" name="limitPerChunk" value="20000" min="1000" step="1000"
+                               placeholder="Enter maximum results per chunk"
+                               aria-label="Maximum results per chunk"
+                               class="w-full">
+                    </div>
+                    
+                    <div>
+                        <label class="block text-sm font-medium mb-2">
+                            <i class="fas fa-file-excel mr-1"></i> Export Filename (optional)
+                        </label>
+                        <input type="text" id="exportFilename" name="exportFilename" 
+                               placeholder="e.g., shisha_search_results"
+                               aria-label="Export filename"
+                               class="w-full">
+                        <p class="text-xs mt-1 label-tertiary">Leave empty for auto-generated name</p>
+                    </div>
+                    
+                    <div class="pt-2">
+                        <button type="submit" class="btn-primary w-full flex items-center justify-center">
+                            <i class="fas fa-search mr-2"></i> Start Search
+                        </button>
+                    </div>
+                </form>
+                
+                <div class="mt-8">
+                    <h3 class="font-medium mb-3">
+                        <i class="fas fa-history mr-1"></i> Recent Searches
+                    </h3>
+                    <div id="recent-searches" class="space-y-2 max-h-64 overflow-y-auto">
+                        <div class="text-sm" style="color: var(--text-secondary)">Loading...</div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Logs and Results -->
+            <div class="lg:col-span-3 space-y-6">
+                <!-- Current Search -->
+                <div class="card p-6 fade-in">
+                    <div class="flex justify-between items-center mb-4">
+                        <h2 class="text-xl font-semibold">
+                            <i class="fas fa-chart-line mr-2"></i>Current Search
+                        </h2>
+                        <div id="searchStatus" class="text-sm status-badge pending">No active search</div>
+                    </div>
+                    
+                    <div id="searchProgress" class="hidden">
+                        <div class="progress-bar mb-4">
+                            <div id="progressBar" class="progress-bar-fill"></div>
+                        </div>
+                        <div class="flex justify-between text-sm mb-2" style="color: var(--text-secondary)">
+                            <span id="progressText">Starting...</span>
+                            <span id="progressTime">00:00:00</span>
+                        </div>
+                    </div>
+                    
+                    <div id="searchResults" class="hidden">
+                        <div class="bg-green-50 border-l-4 border-green-400 p-4 mb-4">
+                            <div class="flex">
+                                <div class="flex-shrink-0">
+                                    <i class="fas fa-check-circle text-green-400"></i>
+                                </div>
+                                <div class="ml-3">
+                                    <p class="text-sm text-green-700">
+                                        Search completed! <a href="#" id="downloadLink" class="font-medium underline text-green-700 hover:text-green-600">Download results</a>
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Logs -->
+                <div class="card p-6 fade-in">
+                    <div class="flex justify-between items-center mb-4">
+                        <h2 class="text-xl font-semibold">
+                            <i class="fas fa-terminal mr-2"></i>Search Logs
+                        </h2>
+                        <button id="clearLogs" class="btn-secondary">
+                            <i class="fas fa-trash-alt mr-1"></i> Clear
+                        </button>
+                    </div>
+                    
+                    <div id="logContainer" class="log-container h-96">
+                        <div style="color: var(--text-tertiary)">Logs will appear here when a search is running...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+    <script>
+        // Theme Management
+        const themeToggle = document.getElementById('themeToggle');
+        const themeIcon = document.getElementById('themeIcon');
+        const html = document.documentElement;
+        
+        // Load saved theme or default to light
+        const savedTheme = localStorage.getItem('theme') || 'light';
+        html.setAttribute('data-theme', savedTheme);
+        updateThemeIcon(savedTheme);
+        
+        function updateThemeIcon(theme) {
+            if (theme === 'dark') {
+                themeIcon.className = 'fas fa-moon';
+            } else {
+                themeIcon.className = 'fas fa-sun';
+            }
+        }
+        
+        themeToggle.addEventListener('click', () => {
+            const currentTheme = html.getAttribute('data-theme');
+            const newTheme = currentTheme === 'light' ? 'dark' : 'light';
+            html.setAttribute('data-theme', newTheme);
+            localStorage.setItem('theme', newTheme);
+            updateThemeIcon(newTheme);
+        });
+        
+        // Global variables
+        let currentSearchId = null;
+        let logInterval = null;
+        let searchStartTime = null;
+        let searchTimer = null;
+        
+        // DOM Elements
+        const searchForm = document.getElementById('searchForm');
+        const logContainer = document.getElementById('logContainer');
+        const searchStatus = document.getElementById('searchStatus');
+        const searchProgress = document.getElementById('searchProgress');
+        const progressBar = document.getElementById('progressBar');
+        const progressText = document.getElementById('progressText');
+        const progressTime = document.getElementById('progressTime');
+        const searchResults = document.getElementById('searchResults');
+        const downloadLink = document.getElementById('downloadLink');
+        const recentSearches = document.getElementById('recent-searches');
+        const clearLogsBtn = document.getElementById('clearLogs');
+        const connectionStatus = document.getElementById('connection-status');
+        const connectionText = document.getElementById('connection-text');
+        
+        // Format time
+        function formatTime(seconds) {
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const s = Math.floor(seconds % 60);
+            return [
+                h.toString().padStart(2, '0'),
+                m.toString().padStart(2, '0'),
+                s.toString().padStart(2, '0')
+            ].join(':');
+        }
+        
+        // Update timer
+        function updateTimer() {
+            if (!searchStartTime) return;
+            const elapsed = Math.floor((Date.now() - searchStartTime) / 1000);
+            progressTime.textContent = formatTime(elapsed);
+        }
+        
+        // Track if user has manually scrolled
+        let userHasScrolled = false;
+        let lastScrollHeight = 0;
+        
+        logContainer.addEventListener('scroll', () => {
+            const isAtBottom = logContainer.scrollHeight - logContainer.scrollTop - logContainer.clientHeight < 50;
+            userHasScrolled = !isAtBottom;
+        });
+        
+        // Add a log entry to the UI
+        function addLogEntry(message, type = 'info') {
+            // Skip empty messages
+            if (!message || !message.trim()) return;
+            
+            const logEntry = document.createElement('div');
+            logEntry.className = `log-entry ${type}`;
+            
+            // Extract timestamp if present (format: YYYY-MM-DD HH:MM:SS)
+            const timestampMatch = message.match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) - (.*)/);
+            let displayMessage = message;
+            
+            if (timestampMatch) {
+                const [, timestamp, msg] = timestampMatch;
+                displayMessage = `<span style="opacity: 0.7">[${timestamp}]</span> ${msg}`;
+            } else {
+                // No timestamp in message, add current time
+                const timestamp = new Date().toLocaleTimeString();
+                displayMessage = `<span style="opacity: 0.7">[${timestamp}]</span> ${message}`;
+            }
+            
+            // Clean up common patterns
+            displayMessage = displayMessage
+                .replace(/\x1b\[.*?m/g, '')  // Remove ANSI color codes
+                .replace(/\n/g, '<br>')       // Convert newlines to <br>
+                .replace(/\s+/g, ' ')         // Normalize whitespace
+                .trim();
+            
+            logEntry.innerHTML = displayMessage;
+            
+            // Check if we should auto-scroll (only if user hasn't manually scrolled up)
+            const shouldAutoScroll = !userHasScrolled || 
+                                    (logContainer.scrollHeight - logContainer.scrollTop - logContainer.clientHeight < 50);
+            
+            // Append to bottom
+            logContainer.appendChild(logEntry);
+            
+            // Auto-scroll to bottom if appropriate
+            if (shouldAutoScroll) {
+                logContainer.scrollTop = logContainer.scrollHeight;
+            }
+        }
+        
+        // Set default dates (last 30 days)
+        function setDefaultDates() {
+            const endDate = new Date();
+            const startDate = new Date();
+            startDate.setDate(startDate.getDate() - 30);
+            
+            document.getElementById('start_date').valueAsDate = startDate;
+            document.getElementById('end_date').valueAsDate = endDate;
+        }
+        
+        // Start search
+        searchForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const keywords = document.getElementById('keywords').value.split(',').map(k => k.trim()).filter(k => k);
+            const startDate = document.getElementById('start_date').value;
+            const endDate = document.getElementById('end_date').value;
+            const chunkDays = parseInt(document.getElementById('chunkDays').value);
+            const limitPerChunk = parseInt(document.getElementById('limitPerChunk').value);
+            const exportFilename = document.getElementById('exportFilename').value.trim();
+            
+            if (keywords.length === 0) {
+                alert('Please enter at least one keyword');
+                return;
+            }
+            
+            if (!startDate || !endDate) {
+                alert('Please select both start and end dates');
+                return;
+            }
+            
+            if (new Date(startDate) > new Date(endDate)) {
+                alert('Start date cannot be after end date');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/search', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        keywords: keywords,
+                        start_date: startDate,
+                        end_date: endDate,
+                        chunk_days: chunkDays,
+                        limit_per_chunk: limitPerChunk,
+                        export_filename: exportFilename
+                    })
+                });
+                
+                const data = await response.json();
+                currentSearchId = data.search_id;
+                
+                // Reset log tracking
+                lastLogCount = 0;
+                userHasScrolled = false;
+                
+                // Update UI
+                searchStatus.textContent = 'Search in progress...';
+                searchStatus.className = 'text-sm status-badge pending';
+                searchProgress.classList.remove('hidden');
+                searchResults.classList.add('hidden');
+                
+                // Start log updates
+                startLogUpdates();
+                
+                // Start timer
+                searchStartTime = Date.now();
+                searchTimer = setInterval(updateTimer, 1000);
+                
+                // Update recent searches
+                loadRecentSearches();
+                
+            } catch (error) {
+                console.error('Error starting search:', error);
+                addLogEntry(`Error: ${error.message}`, 'error');
+            }
+        });
+        
+        // Start log updates
+        function startLogUpdates() {
+            // Clear any existing interval
+            if (logInterval) clearInterval(logInterval);
+            
+            // Initial fetch
+            fetchLogs();
+            
+            // Set up polling
+            logInterval = setInterval(fetchLogs, 2000);
+        }
+        
+        // Track last log count to avoid duplicates
+        let lastLogCount = 0;
+        
+        // Fetch logs from server
+        async function fetchLogs() {
+            if (!currentSearchId) return;
+            
+            try {
+                const response = await axios.get(`/api/logs/${currentSearchId}`);
+                
+                // Handle 202 (Accepted) - search is still running but no logs yet
+                if (response.status === 202) {
+                    if (logContainer.textContent.includes('No logs found for this search yet')) {
+                        return; // Don't keep adding the same message
+                    }
+                    if (!logContainer.textContent.includes('Search is starting')) {
+                        logContainer.innerHTML = '';
+                        addLogEntry('Search is starting. This may take a moment...', 'info');
+                    }
+                    return;
+                }
+                
+                // Handle successful response with logs
+                if (response.data) {
+                    const logs = response.data.split('\n').filter(line => line.trim() !== '');
+                    
+                    if (logs.length === 0) {
+                        if (!logContainer.textContent.includes('No logs available')) {
+                            logContainer.innerHTML = '';
+                            addLogEntry('No logs available yet. The search is starting...', 'info');
+                        }
+                        return;
+                    }
+                    
+                    // Only add new logs (avoid duplicates)
+                    if (logs.length > lastLogCount) {
+                        // First time or new logs available
+                        if (lastLogCount === 0) {
+                            logContainer.innerHTML = '';
+                        }
+                        
+                        // Add only new logs
+                        for (let i = lastLogCount; i < logs.length; i++) {
+                            const log = logs[i];
+                            if (!log.trim()) continue;
+                            
+                            // Simple log type detection
+                            let type = 'info';
+                            const logLower = log.toLowerCase();
+                            if (logLower.includes('error') && !logLower.includes('no error')) {
+                                type = 'error';
+                            } else if (logLower.includes('warn') || log.includes('⚠️')) {
+                                type = 'warning';
+                            } else if (logLower.includes('success') || log.includes('✅') || logLower.includes('completed')) {
+                                type = 'success';
+                            }
+                            
+                            addLogEntry(log, type);
+                        }
+                        
+                        lastLogCount = logs.length;
+                    }
+                    
+                    // Check for completion in the most recent log
+                    const mostRecentLog = logs[logs.length - 1];
+                    if (mostRecentLog.includes('Search completed') || mostRecentLog.includes('Results saved to')) {
+                        if (logInterval) clearInterval(logInterval);
+                        
+                        // Determine if search was successful
+                        const hasResults = mostRecentLog.includes('Results saved to');
+                        const noResults = mostRecentLog.includes('No results found');
+                        
+                        if (hasResults) {
+                            searchStatus.textContent = '✅ Search Completed Successfully';
+                            searchStatus.className = 'text-sm status-badge success';
+                            
+                            // Show download link
+                            const match = mostRecentLog.match(/Results saved to: (.+\.xlsx)/);
+                            if (match && match[1]) {
+                                const filepath = match[1].trim();
+                                const filename = filepath.split(/[\/\\]/).pop(); // Get filename from path
+                                downloadLink.href = `/download/${filename}`;
+                                downloadLink.textContent = `📥 Download ${filename}`;
+                                searchResults.classList.remove('hidden');
+                                
+                                // Reload recent searches to show this one
+                                setTimeout(() => loadRecentSearches(), 1000);
+                                
+                                // Show success notification
+                                showNotification('✅ Search Complete!', `Your results are ready for download. Found results in the file.`, 'success');
+                                
+                                // Play success sound
+                                playNotificationSound('success');
+                            }
+                        } else if (noResults) {
+                            searchStatus.textContent = '⚠️ Search Completed - No Results';
+                            searchStatus.className = 'text-sm status-badge warning';
+                            
+                            // Show no results notification
+                            showNotification('🔍 Search Complete', 'No messages found matching your criteria.', 'info');
+                            playNotificationSound('info');
+                        } else {
+                            searchStatus.textContent = '✅ Search Completed';
+                            searchStatus.className = 'text-sm status-badge success';
+                        }
+                        
+                        if (searchTimer) clearInterval(searchTimer);
+                    }
+                }
+            } catch (error) {
+                console.error('Error fetching logs:', error);
+            }
+        }
+        
+        // Show browser notification
+        function showNotification(title, message, type = 'info') {
+            // Request permission for browser notifications
+            if ('Notification' in window && Notification.permission === 'granted') {
+                new Notification(title, {
+                    body: message,
+                    icon: type === 'success' ? '✅' : type === 'warning' ? '⚠️' : 'ℹ️',
+                    requireInteraction: true
+                });
+            }
+            
+            // Also show an alert for immediate attention
+            if (type === 'success') {
+                alert(`${title}\n\n${message}\n\nClick OK to continue.`);
+            }
+        }
+        
+        // Play notification sound
+        function playNotificationSound(type = 'success') {
+            try {
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const oscillator = audioContext.createOscillator();
+                const gainNode = audioContext.createGain();
+                
+                oscillator.connect(gainNode);
+                gainNode.connect(audioContext.destination);
+                
+                if (type === 'success') {
+                    // Success: two ascending tones
+                    oscillator.frequency.value = 523.25; // C5
+                    gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+                    oscillator.start(audioContext.currentTime);
+                    oscillator.stop(audioContext.currentTime + 0.1);
+                    
+                    setTimeout(() => {
+                        const osc2 = audioContext.createOscillator();
+                        const gain2 = audioContext.createGain();
+                        osc2.connect(gain2);
+                        gain2.connect(audioContext.destination);
+                        osc2.frequency.value = 659.25; // E5
+                        gain2.gain.setValueAtTime(0.3, audioContext.currentTime);
+                        osc2.start(audioContext.currentTime);
+                        osc2.stop(audioContext.currentTime + 0.15);
+                    }, 150);
+                } else {
+                    // Info: single tone
+                    oscillator.frequency.value = 440; // A4
+                    gainNode.gain.setValueAtTime(0.2, audioContext.currentTime);
+                    oscillator.start(audioContext.currentTime);
+                    oscillator.stop(audioContext.currentTime + 0.2);
+                }
+            } catch (e) {
+                console.log('Could not play sound:', e);
+            }
+        }
+        
+        // View logs for a specific search
+        function viewSearchLogs(searchId) {
+            currentSearchId = searchId;
+            searchStatus.textContent = `Viewing logs for search: ${searchId}`;
+            searchStatus.className = 'text-sm font-medium text-blue-600';
+            
+            // Clear and show logs
+            logContainer.innerHTML = '<div class="p-4 text-center text-gray-500">Loading logs...</div>';
+            logContainer.classList.remove('hidden');
+            
+            // Hide download link initially
+            searchResults.classList.add('hidden');
+            
+            // Start polling for logs
+            if (logInterval) clearInterval(logInterval);
+            fetchLogs();
+            logInterval = setInterval(fetchLogs, 2000);
+            
+            // Scroll to logs
+            logContainer.scrollIntoView({ behavior: 'smooth' });
+        }
+        
+        // Format date string to readable format
+        function formatSearchDate(dateStr) {
+            if (!dateStr) return 'N/A';
+            try {
+                const date = new Date(dateStr);
+                return date.toLocaleDateString('en-US', { 
+                    year: 'numeric', 
+                    month: 'short', 
+                    day: 'numeric',
+                    hour: '2-digit',
+                    minute: '2-digit'
+                });
+            } catch (e) {
+                return dateStr;
+            }
+        }
+        
+        // Load recent searches
+        async function loadRecentSearches() {
+            const container = document.getElementById('recent-searches');
+            try {
+                const response = await axios.get('/api/searches');
+                const searches = response.data;
+                
+                if (!searches || searches.length === 0) {
+                    container.innerHTML = '<div class="text-sm text-gray-500 italic">No recent searches found.</div>';
+                    return;
+                }
+                
+                container.innerHTML = searches.map(search => `
+                    <div class="recent-search-item">
+                        <div class="flex justify-between items-start">
+                            <div class="flex-1 min-w-0">
+                                <div class="flex items-center text-sm mb-1">
+                                    <i class="fas fa-search mr-2" style="color: var(--accent-primary); font-size: 0.75rem;"></i>
+                                    <span class="font-medium truncate">
+                                        ${search.keywords || 'No keywords'}
+                                    </span>
+                                </div>
+                                <div class="text-xs" style="color: var(--text-tertiary)">
+                                    <div class="mb-1">
+                                        <i class="fas fa-calendar mr-1"></i>
+                                        ${formatSearchDate(search.start_date)} to ${formatSearchDate(search.end_date)}
+                                    </div>
+                                    <div>
+                                        <i class="fas fa-layer-group mr-1"></i> ${search.chunk_days || 'N/A'} days
+                                        <span class="mx-1">•</span>
+                                        <i class="fas fa-database mr-1"></i> ${search.limit_per_chunk ? search.limit_per_chunk.toLocaleString() : 'N/A'}
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="flex flex-col items-end space-y-1 ml-2">
+                                <button onclick="viewSearchLogs('${search.id}')" 
+                                        class="btn-secondary text-xs px-2 py-1">
+                                    <i class="fas fa-eye mr-1"></i> View
+                                </button>
+                                ${search.completed ? `
+                                <a href="/download/keyword_results_${search.id}.xlsx" 
+                                   class="btn-secondary text-xs px-2 py-1 text-center" style="background-color: rgba(16, 185, 129, 0.1); color: var(--success);">
+                                    <i class="fas fa-download mr-1"></i> Download
+                                </a>` : ''}
+                            </div>
+                        </div>
+                    </div>
+                `).join('');
+                
+            } catch (error) {
+                console.error('Error loading recent searches:', error);
+                container.innerHTML = `
+                    <div class="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+                        <div class="font-medium">Error loading recent searches</div>
+                        <div class="text-xs mt-1">${error.message || 'Unknown error occurred'}</div>
+                    </div>`;
+            }
+        }
+        
+        // Clear logs
+        clearLogsBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            logContainer.innerHTML = '<div class="text-gray-500">Logs cleared</div>';
+        });
+        
+        // Check server connection
+        async function checkConnection() {
+            try {
+                await axios.get('/');
+                connectionStatus.querySelector('.connection-indicator').className = 'connection-indicator connected';
+                connectionText.textContent = 'Connected';
+                return true;
+            } catch (error) {
+                connectionStatus.querySelector('.connection-indicator').className = 'connection-indicator disconnected';
+                connectionText.textContent = 'Disconnected';
+                console.error('Server connection error:', error);
+                return false;
+            }
+        }
+        
+        // Initialize
+        document.addEventListener('DOMContentLoaded', async () => {
+            // Set default date range (last 30 days)
+            setDefaultDates();
+            
+            // Request notification permission
+            if ('Notification' in window && Notification.permission === 'default') {
+                Notification.requestPermission();
+            }
+            
+            // Clear any existing logs
+            logContainer.innerHTML = '';
+            
+            // Show loading state
+            document.getElementById('recent-searches').innerHTML = `
+                <div class="flex items-center justify-center p-4">
+                    <div class="animate-spin rounded-full h-5 w-5 border-b-2 border-blue-500 mr-2"></div>
+                    <span>Loading recent searches...</span>
+                </div>`;
+            
+            // Check server connection
+            try {
+                const isConnected = await checkConnection();
+                
+                if (isConnected) {
+                    // Load recent searches
+                    await loadRecentSearches();
+                    
+                    // Check connection every 30 seconds
+                    setInterval(checkConnection, 30000);
+                    
+                    // Start with a welcome message
+                    addLogEntry('Connected to search service. Configure your search and click "Start Search" to begin.', 'info');
+                } else {
+                    addLogEntry('Could not connect to the search service. Please make sure the server is running and try refreshing the page.', 'error');
+                }
+            } catch (error) {
+                console.error('Initialization error:', error);
+                addLogEntry('Error initializing the application. Please check the console for details.', 'error');
+            }
+        });
+    </script>
+</body>
+</html>
