@@ -13,14 +13,19 @@ app = Flask(__name__)
 # Determine a writable logs directory (Vercel serverless allows only /tmp)
 LOG_DIR = os.environ.get('LOG_DIR')
 if not LOG_DIR:
-    LOG_DIR = '/tmp/logs' if os.environ.get('VERCEL') or os.environ.get('NOW_REGION') else 'logs'
+    # Check if running on Vercel
+    if os.environ.get('VERCEL') or os.environ.get('NOW_REGION') or os.environ.get('VERCEL_ENV'):
+        LOG_DIR = '/tmp/logs'
+    else:
+        LOG_DIR = 'logs'
 
 # Ensure the logs directory exists
 try:
     os.makedirs(LOG_DIR, exist_ok=True)
-except Exception:
-    # As a last resort, fall back to current directory logs
-    LOG_DIR = 'logs'
+except Exception as e:
+    # As a last resort, fall back to /tmp
+    print(f"Failed to create LOG_DIR {LOG_DIR}: {e}")
+    LOG_DIR = '/tmp/logs'
     os.makedirs(LOG_DIR, exist_ok=True)
 
 @app.route('/')
@@ -272,3 +277,7 @@ def favicon():
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
+
+# Export app for WSGI servers (like Vercel)
+application = app
+

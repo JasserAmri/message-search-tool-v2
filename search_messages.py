@@ -29,10 +29,19 @@ TIMEOUT_WARNING = 30
 MAX_RETRIES = 3
 MIN_RESULTS_FOR_CHUNK = 1000
 
+# Global variable to store logs
+_logs = []
+
+def get_logs():
+    """Get all logs captured so far"""
+    return "\n".join(_logs)
+
 def log_message(message):
-    """Print a message with timestamp"""
+    """Print a message with timestamp and store it in logs"""
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    print(f"{timestamp} - {message}", flush=True)
+    log_entry = f"{timestamp} - {message}"
+    print(log_entry, flush=True)
+    _logs.append(log_entry)
 
 def get_db_config():
     """Get database configuration from environment"""
@@ -407,76 +416,65 @@ def main():
                         log_message(f"   → Some results may be missing from {current_date.date()}")
                     
                     current_date = chunk_end
+            
+            # Process results if we have any
+            if all_results:
+                # Generate a filename for reference
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                if custom_filename:
+                    safe_filename = "".join(c for c in custom_filename if c.isalnum() or c in (' ', '-', '_')).strip()
+                    filename = f'{safe_filename}_{timestamp}.xlsx'
+                else:
+                    filename = f'keyword_results_{timestamp}.xlsx'
+                
+                # Determine output path
+                output_path = os.path.join(LOG_DIR if LOG_DIR else '/tmp/logs', filename)
+                
+                # Export to Excel
+                export_to_excel(all_results, output_path)
+                
+                # Print summary
+                log_message("\n" + "=" * 60)
+                log_message(f"✅ Search completed successfully!")
+                log_message(f"   Total results: {len(all_results):,}")
+                log_message(f"   Total chunks: {total_chunks}")
+                log_message(f"   Total time: {total_time:.1f} seconds")
+                log_message(f"   Results saved to: {output_path}")
+                log_message("=" * 60)
+                
+                # Return the results and file path for the web app to handle
+                return {
+                    'success': True,
+                    'result_count': len(all_results),
+                    'excel_path': output_path,
+                    'filename': filename,
+                    'logs': get_logs()
+                }
+            else:
+                log_message("\nNo results found for the given criteria.")
+                return {
+                    'success': True,
+                    'result_count': 0,
+                    'message': 'No results found',
+                    'logs': get_logs()
+                }
         finally:
             pbar.close()
-    
-    # Process results if we have any
-    if all_results:
-        # Generate a filename for reference
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        if custom_filename:
-            safe_filename = "".join(c for c in custom_filename if c.isalnum() or c in (' ', '-', '_')).strip()
-            filename = f'{safe_filename}_{timestamp}.xlsx'
-        else:
-            filename = f'keyword_results_{timestamp}.xlsx'
-        
-        # Export to Excel and get the temp file path
-        excel_path = export_to_excel(all_results)
-        
-        # Print summary
-        log_message("\n" + "=" * 60)
-        log_message(f"✅ Search completed successfully!")
-        log_message(f"   Total results: {len(all_results):,}")
-        log_message(f"   Total chunks: {total_chunks}")
-        log_message(f"   Total time: {total_time:.1f} seconds")
-        log_message(f"   Results prepared in: {excel_path}")
-        log_message("=" * 60)
-        
-        # Return the results and file path for the web app to handle
+                
+    except Exception as e:
+        log_message(f"\n❌ An error occurred during search: {e}")
+        if 'conn' in locals() and conn is not None:
+            conn.rollback()
         return {
-            'success': True,
-            'result_count': len(all_results),
-            'excel_path': excel_path,
-            'filename': filename,
-            'logs': get_logs()  # Get all logs so far
-        }
-    else:
-        log_message("\nNo results found for the given criteria.")
-        return {
-            'success': True,
-            'result_count': 0,
-            'message': 'No results found',
+            'success': False,
+            'error': str(e),
             'logs': get_logs()
         }
-        
-except Exception as e:
-    log_message(f"\n❌ An error occurred during search: {e}")
-    if 'conn' in locals() and conn is not None:
-        conn.rollback()
-    return {
-        'success': False,
-        'error': str(e),
-        'logs': get_logs()
-    }
-finally:
-    # Close database connection
-    if 'conn' in locals() and conn is not None:
-        conn.close()
-        log_message("✅ Database connection closed")
-
-# Global variable to store logs
-_logs = []
-
-def get_logs():
-    """Get all logs captured so far"""
-    return "\n".join(_logs)
-
-def log_message(message):
-    """Print a message with timestamp and store it in logs"""
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    log_entry = f"{timestamp} - {message}"
-    print(log_entry, flush=True)
-    _logs.append(log_entry)
+    finally:
+        # Close database connection
+        if 'conn' in locals() and conn is not None:
+            conn.close()
+            log_message("✅ Database connection closed")
 
 if __name__ == "__main__":
     main()
