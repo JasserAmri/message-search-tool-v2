@@ -31,17 +31,47 @@ MIN_RESULTS_FOR_CHUNK = 1000
 
 # Global variable to store logs
 _logs = []
+_event_queue = None  # For SSE streaming
+_cancel_flag = {'cancelled': False}  # For cancellation
+
+def set_event_queue(queue):
+    """Set the event queue for SSE streaming"""
+    global _event_queue
+    _event_queue = queue
+
+def set_cancel_flag(flag_dict):
+    """Set the cancellation flag dictionary"""
+    global _cancel_flag
+    _cancel_flag = flag_dict
+
+def is_cancelled():
+    """Check if search has been cancelled"""
+    return _cancel_flag.get('cancelled', False)
 
 def get_logs():
     """Get all logs captured so far"""
     return "\n".join(_logs)
 
-def log_message(message):
-    """Print a message with timestamp and store it in logs"""
+def log_message(message, progress_data=None):
+    """Print a message with timestamp, store it in logs, and emit to SSE queue"""
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     log_entry = f"{timestamp} - {message}"
     print(log_entry, flush=True)
     _logs.append(log_entry)
+    
+    # Send to SSE queue if available
+    if _event_queue is not None:
+        event = {
+            'type': 'log',
+            'message': message,
+            'timestamp': timestamp
+        }
+        if progress_data:
+            event.update(progress_data)
+        try:
+            _event_queue.put_nowait(event)
+        except:
+            pass  # Queue full or closed, continue anyway
 
 def get_db_config():
     """Get database configuration from environment"""
@@ -151,6 +181,10 @@ def search_chunk(cursor, keywords: List[str], start_date: datetime,
             
 def export_to_excel(results: List[dict], output_file: str):
     """Export results to Excel file"""
+    log_message(f"\n📊 Exporting results to Excel...")
+    log_message(f"   Output file: {output_file}")
+    log_message(f"   Total rows: {len(results)}")
+    
     wb = Workbook()
     ws = wb.active
     ws.title = "Search Results"
@@ -175,7 +209,9 @@ def export_to_excel(results: List[dict], output_file: str):
         adjusted_width = min(max_length + 2, 50)
         ws.column_dimensions[column_letter].width = adjusted_width
     
+    log_message(f"   Saving workbook...")
     wb.save(output_file)
+    log_message(f"   ✅ Excel file saved successfully: {output_file}")
 
 def sample_and_optimize(cursor, keywords: List[str], start_date: datetime, end_date: datetime) -> Tuple[int, int]:
     """
@@ -373,14 +409,49 @@ def main():
         use_tqdm = sys.stdout.isatty()
         
         pbar = tqdm(total=total_days, desc="Progress", disable=not use_tqdm)
+        
+        # Calculate estimated chunks
+        estimated_chunks = (total_days + chunk_days - 1) // chunk_days
+        
         try:
             while current_date < end_date:
+                # Check for cancellation
+                if is_cancelled():
+                    log_message("\n⚠️  Search cancelled by user")
+                    break
+                
                 total_chunks += 1
                 chunk_end = min(current_date + timedelta(days=chunk_days), end_date)
                 
-                # Log chunk info
+                # Calculate progress
+                days_processed = (current_date - start_date).days
+                progress_percent = int((days_processed / total_days) * 100) if total_days > 0 else 0
+                
+                # Estimate time remaining
+                if total_time > 0 and days_processed > 0:
+                    avg_time_per_day = total_time / days_processed
+                    days_remaining = total_days - days_processed
+                    eta_seconds = int(avg_time_per_day * days_remaining)
+                    eta_minutes = eta_seconds // 60
+                    eta_display = f"{eta_minutes}m {eta_seconds % 60}s" if eta_minutes > 0 else f"{eta_seconds}s"
+                else:
+                    eta_display = "calculating..."
+                
+                # Log chunk info with progress
                 chunk_days_actual = (chunk_end - current_date).days
-                log_message(f"\n📅 Processing chunk {total_chunks}: {current_date.strftime('%Y-%m-%d')} to {chunk_end.strftime('%Y-%m-%d')} ({chunk_days_actual} days)")
+                progress_data = {
+                    'progress': progress_percent,
+                    'current_chunk': total_chunks,
+                    'estimated_chunks': estimated_chunks,
+                    'eta': eta_display,
+                    'results_so_far': len(all_results)
+                }
+                log_message(
+                    f"\n📅 Chunk {total_chunks}/{estimated_chunks} ({progress_percent}%) - ETA: {eta_display}\n"
+                    f"   Date range: {current_date.strftime('%Y-%m-%d')} to {chunk_end.strftime('%Y-%m-%d')} ({chunk_days_actual} days)\n"
+                    f"   Results so far: {len(all_results):,}",
+                    progress_data=progress_data
+                )
                 
                 # Skip chunks that are completely before start_date (shouldn't happen but just in case)
                 if chunk_end <= start_date:
@@ -423,15 +494,17 @@ def main():
                 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
                 if custom_filename:
                     safe_filename = "".join(c for c in custom_filename if c.isalnum() or c in (' ', '-', '_')).strip()
-                    filename = f'{safe_filename}_{timestamp}.xlsx'
+                    filename = f'{safe_filename}.xlsx' if not safe_filename.endswith('.xlsx') else safe_filename
                 else:
                     filename = f'keyword_results_{timestamp}.xlsx'
                 
-                # Determine output path
-                output_path = os.path.join(LOG_DIR if LOG_DIR else '/tmp/logs', filename)
+                # ALWAYS save to Downloads folder - no fallbacks
+                downloads_path = os.path.join(os.path.expanduser('~'), 'Downloads', filename)
+                
+                log_message(f"\n💾 Saving to Downloads folder: {downloads_path}")
                 
                 # Export to Excel
-                export_to_excel(all_results, output_path)
+                export_to_excel(all_results, downloads_path)
                 
                 # Print summary
                 log_message("\n" + "=" * 60)
@@ -439,7 +512,7 @@ def main():
                 log_message(f"   Total results: {len(all_results):,}")
                 log_message(f"   Total chunks: {total_chunks}")
                 log_message(f"   Total time: {total_time:.1f} seconds")
-                log_message(f"   Results saved to: {output_path}")
+                log_message(f"   📁 File saved to: {downloads_path}")
                 log_message("=" * 60)
                 
                 # Return the results and file path for the web app to handle

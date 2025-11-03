@@ -202,26 +202,49 @@ input[type="text"]::placeholder {
     margin-bottom: 0.25rem;
     border-radius: 4px;
     word-wrap: break-word;
+    font-size: 0.85rem;
+    line-height: 1.6;
 }
 
 .log-entry.info {
-    background-color: rgba(59, 130, 246, 0.1);
+    background-color: rgba(59, 130, 246, 0.08);
     border-left: 3px solid var(--accent-primary);
 }
 
 .log-entry.success {
-    background-color: rgba(16, 185, 129, 0.1);
+    background-color: rgba(16, 185, 129, 0.08);
     border-left: 3px solid var(--success);
+    font-weight: 500;
 }
 
 .log-entry.warning {
-    background-color: rgba(245, 158, 11, 0.1);
+    background-color: rgba(245, 158, 11, 0.08);
     border-left: 3px solid var(--warning);
 }
 
 .log-entry.error {
-    background-color: rgba(239, 68, 68, 0.1);
+    background-color: rgba(239, 68, 68, 0.08);
     border-left: 3px solid var(--error);
+    font-weight: 600;
+}
+
+/* SQL Query Highlighting */
+.log-entry:has(.sql-query) {
+    background-color: rgba(139, 92, 246, 0.08);
+    border-left: 3px solid #8b5cf6;
+}
+
+/* Progress Update Highlighting */
+.log-entry:has(.progress-info) {
+    background-color: rgba(59, 130, 246, 0.12);
+    border-left: 3px solid var(--accent-primary);
+    font-weight: 500;
+}
+
+/* Database Connection Highlighting */
+.log-entry:has(.db-info) {
+    background-color: rgba(16, 185, 129, 0.08);
+    border-left: 3px solid var(--success);
 }
 
 /* Recent Searches */

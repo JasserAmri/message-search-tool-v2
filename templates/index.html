@@ -7,6 +7,7 @@
     <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
     <link rel="stylesheet" href="/static/style.css">
+    <script src="/static/search-sse.js" defer></script>
 </head>
 <body>
     <div class="min-h-screen">
@@ -124,7 +125,12 @@
                         <h2 class="text-xl font-semibold">
                             <i class="fas fa-chart-line mr-2"></i>Current Search
                         </h2>
-                        <div id="searchStatus" class="text-sm status-badge pending">No active search</div>
+                        <div class="flex items-center space-x-2">
+                            <button id="cancelSearchBtn" class="btn-secondary" style="display: none;">
+                                <i class="fas fa-times mr-1"></i> Cancel
+                            </button>
+                            <div id="searchStatus" class="text-sm status-badge pending">No active search</div>
+                        </div>
                     </div>
                     
                     <div id="searchProgress" class="hidden">
@@ -165,7 +171,7 @@
                     </div>
                     
                     <div id="logContainer" class="log-container h-96">
-                        <div style="color: var(--text-tertiary)">Logs will appear here when a search is running...</div>
+                        <div id="searchLogs" style="color: var(--text-tertiary)">Logs will appear here when a search is running...</div>
                     </div>
                 </div>
             </div>
@@ -357,8 +363,13 @@
                 searchProgress.classList.remove('hidden');
                 searchResults.classList.add('hidden');
                 
-                // Start log updates
-                startLogUpdates();
+                // Use SearchUI for SSE streaming (falls back to polling automatically)
+                if (window.searchUI) {
+                    window.searchUI.startSearch(currentSearchId);
+                } else {
+                    // Fallback to old polling if SearchUI not available
+                    startLogUpdates();
+                }
                 
                 // Start timer
                 searchStartTime = Date.now();
