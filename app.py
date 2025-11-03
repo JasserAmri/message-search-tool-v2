@@ -10,8 +10,18 @@ from search_messages import main as run_search_function
 
 app = Flask(__name__)
 
+# Determine a writable logs directory (Vercel serverless allows only /tmp)
+LOG_DIR = os.environ.get('LOG_DIR')
+if not LOG_DIR:
+    LOG_DIR = '/tmp/logs' if os.environ.get('VERCEL') or os.environ.get('NOW_REGION') else 'logs'
+
 # Ensure the logs directory exists
-os.makedirs('logs', exist_ok=True)
+try:
+    os.makedirs(LOG_DIR, exist_ok=True)
+except Exception:
+    # As a last resort, fall back to current directory logs
+    LOG_DIR = 'logs'
+    os.makedirs(LOG_DIR, exist_ok=True)
 
 @app.route('/')
 def index():
@@ -46,15 +56,14 @@ def search():
         search_id = f"search_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
         # Save search parameters to a file
-        with open(f'logs/{search_id}_params.json', 'w') as f:
+        with open(os.path.join(LOG_DIR, f'{search_id}_params.json'), 'w') as f:
             json.dump(params, f)
 
         # Run search in background
         def search_task():
-            log_file = None
             try:
                 # Ensure logs directory exists
-                os.makedirs('logs', exist_ok=True)
+                os.makedirs(LOG_DIR, exist_ok=True)
 
                 # Update environment variables for this search
                 os.environ['KEYWORDS'] = ','.join(params['keywords'])
@@ -65,42 +74,24 @@ def search():
                 os.environ['EXPORT_FILENAME'] = params.get('export_filename', '')
                 os.environ['AUTO_OPTIMIZE'] = 'true'  # Enable intelligent sampling
 
-                # Open log file and redirect stdout/stderr
-                log_file = open(f'logs/{search_id}.log', 'a', encoding='utf-8')
-                sys.stdout = log_file
-                sys.stderr = log_file
-
                 # Write initial log message
                 start_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                log_message(f'Search started at {start_time}')
-                log_message(f'Keywords: {params["keywords"]}')
-                log_message(f'Date range: {params["start_date"]} to {params["end_date"]}')
-                log_message('-' * 50)
+                log_message(f'Search started at {start_time}', search_id)
+                log_message(f'Keywords: {params["keywords"]}', search_id)
+                log_message(f'Date range: {params["start_date"]} to {params["end_date"]}', search_id)
+                log_message('-' * 50, search_id)
 
                 try:
                     # Run the search function
                     from search_messages import main as search_main
                     search_main()
                 finally:
-                    # Restore stdout and stderr
-                    if log_file:
-                        try:
-                            end_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                            log_message(f'\nSearch completed at {end_time}')
-                            log_message('=' * 50)
-
-                            sys.stdout = sys.__stdout__
-                            sys.stderr = sys.__stderr__
-                            log_file.close()
-                        except:
-                            # If anything goes wrong, just make sure we don't crash
-                            if 'sys' in globals() and hasattr(sys, '__stdout__'):
-                                sys.stdout = sys.__stdout__
-                                sys.stderr = sys.__stderr__
-                            if log_file and not log_file.closed:
-                                log_file.close()
+                    # Write completion marker
+                    end_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    log_message(f'\nSearch completed at {end_time}', search_id)
+                    log_message('=' * 50, search_id)
             except Exception as e:
-                log_message(f"❌ Error during search: {str(e)}")
+                log_message(f"❌ Error during search: {str(e)}", search_id)
                 raise
 
         # Start the search in a separate thread
@@ -140,23 +131,68 @@ def log_message(message, search_id=None):
     
     # Write to log file if search_id is provided
     if search_id:
-        os.makedirs('logs', exist_ok=True)
-        with open(f'logs/{search_id}.log', 'a', encoding='utf-8') as f:
-            f.write(f"{log_entry}\n")
+        try:
+            # Ensure LOG_DIR exists
+            os.makedirs(LOG_DIR, exist_ok=True)
+            
+            # Try writing to the log file
+            log_path = os.path.join(LOG_DIR, f'{search_id}.log')
+            with open(log_path, 'a', encoding='utf-8') as f:
+                f.write(f"{log_entry}\n")
+                
+        except Exception as e:
+            # If writing to LOG_DIR fails, try /tmp/logs as fallback
+            try:
+                temp_log_dir = '/tmp/logs'
+                os.makedirs(temp_log_dir, exist_ok=True)
+                temp_log_path = os.path.join(temp_log_dir, f'{search_id}.log')
+                with open(temp_log_path, 'a', encoding='utf-8') as f:
+                    f.write(f"{timestamp} - [FALLBACK LOG] {message}\n")
+                print(f"Logged to fallback location: {temp_log_path}")
+            except Exception as inner_e:
+                print(f"Failed to write to log file: {str(inner_e)}")
 
 @app.route('/api/logs/<search_id>')
 def get_logs(search_id):
-    log_path = os.path.join('logs', f'{search_id}.log')
     try:
-        if not os.path.exists(log_path):
-            return "No logs found for this search yet. The search might still be running.", 202
+        # Try multiple possible log locations
+        possible_paths = [
+            os.path.join(LOG_DIR, f'{search_id}.log'),
+            os.path.join('/tmp', 'logs', f'{search_id}.log'),
+            os.path.join(os.getcwd(), 'logs', f'{search_id}.log')
+        ]
         
-        # Read the last 1000 lines to avoid sending too much data
-        with open(log_path, 'r', encoding='utf-8') as f:
-            lines = f.readlines()
+        log_content = ""
+        log_found = False
+        
+        for log_path in possible_paths:
+            try:
+                if os.path.exists(log_path):
+                    with open(log_path, 'r', encoding='utf-8') as f:
+                        lines = f.readlines()
+                        log_content = ''.join(lines[-1000:])  # Last 1000 lines
+                        log_found = True
+                        break
+            except Exception as e:
+                print(f"Error reading log file {log_path}: {str(e)}")
+                continue
+        
+        if not log_found:
+            # If no log file found, check if search is still running
+            param_paths = [
+                os.path.join(LOG_DIR, f'{search_id}_params.json'),
+                os.path.join('/tmp', 'logs', f'{search_id}_params.json'),
+                os.path.join(os.getcwd(), 'logs', f'{search_id}_params.json')
+            ]
             
-        # Return the last 1000 lines (or all if fewer)
-        return ''.join(lines[-1000:]) if lines else "No log entries found."
+            params_exist = any(os.path.exists(p) for p in param_paths)
+            
+            if params_exist:
+                return "Search is still running or logs were not saved. Please try again in a moment.", 202
+            else:
+                return "No logs found for this search ID. The search may have completed too long ago.", 404
+                
+        return log_content if log_content.strip() else "Log file is empty."
         
     except Exception as e:
         return f"Error reading logs: {str(e)}", 500
@@ -165,19 +201,19 @@ def get_logs(search_id):
 def list_searches():
     searches = []
     try:
-        if not os.path.exists('logs'):
-            os.makedirs('logs', exist_ok=True)
+        if not os.path.exists(LOG_DIR):
+            os.makedirs(LOG_DIR, exist_ok=True)
             return jsonify(searches)
             
-        for filename in os.listdir('logs'):
+        for filename in os.listdir(LOG_DIR):
             if filename.endswith('_params.json'):
                 search_id = filename.replace('_params.json', '')
                 try:
-                    with open(os.path.join('logs', filename), 'r') as f:
+                    with open(os.path.join(LOG_DIR, filename), 'r') as f:
                         params = json.load(f)
                     
                     # Check if log file exists and if search completed
-                    log_path = os.path.join('logs', f'{search_id}.log')
+                    log_path = os.path.join(LOG_DIR, f'{search_id}.log')
                     completed = False
                     if os.path.exists(log_path):
                         with open(log_path, 'r', encoding='utf-8') as log_f:
